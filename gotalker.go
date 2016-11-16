@@ -133,11 +133,15 @@ func handleInput(u *User) {
 				userList.RemoveUser(u)
 				break
 			case ".who":
+				u.Write("\n+----------------------+-----------+\n")
 				for _, currentUser := range userList {
-					u.Write(currentUser.Name + "\n")
+					timeDifference := time.Since(currentUser.LastInput)
+					diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
+					u.Write(fmt.Sprintf("| %-20s | %9s |\n", currentUser.Name, diffString))
 				}
-
-				u.Write(fmt.Sprintf("Users Online: %d\n", len(userList)))
+				u.Write("+----------------------+-----------+\n")
+				u.Write(fmt.Sprintf("| Users Online: %-3d %-14s |\n", len(userList), " "))
+				u.Write("+----------------------+-----------+\n\n")
 			default:
 				if text != "" {
 					writeWorld(userList, u.Name+" says: "+text+"\n")
