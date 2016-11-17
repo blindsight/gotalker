@@ -3,9 +3,12 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 const (
@@ -19,6 +22,8 @@ const (
 	LoginPasswd
 	LoginConfirm
 	LoginPrompt
+	SocketTypeNetwork = iota
+	SocketTypeWebSocket
 )
 
 //var connections []net.Conn
@@ -28,12 +33,27 @@ type User struct {
 	Description string
 	Login       uint8
 	Socket      net.Conn
+	WebSocket   *websocket.Conn
 	LastInput   time.Time
+	SocketType  uint8
 }
 
 func (u *User) Write(str string) {
 	//more will be added to this over time
-	u.Socket.Write([]byte(str))
+	if u.SocketType == SocketTypeWebSocket {
+		websocket.Message.Send(u.WebSocket, str)
+		//u.WebSocket.Write([]byte(str))
+	} else {
+		u.Socket.Write([]byte(str))
+	}
+}
+
+func (u *User) Close() {
+	if u.SocketType == SocketTypeWebSocket {
+		u.WebSocket.Close()
+	} else {
+		u.Socket.Close()
+	}
 }
 
 type users []*User
@@ -66,6 +86,8 @@ var commands map[string]func(*User, string) bool
 
 func main() {
 	port := 2000
+	webPort := 2010
+	publicDirectory := "var/gotalker/public"
 
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 
@@ -75,8 +97,8 @@ func main() {
 
 	userList = users{}
 	fmt.Println("/------------------------------------------------------------\\")
-	fmt.Println(" Talker setting up on port " + strconv.Itoa(port))
-	fmt.Println("\\------------------------------------------------------------/")
+	fmt.Printf(" GoTalker server booting %s\n", time.Now().Format(time.ANSIC))
+	fmt.Println("|-------------------------------------------------------------|")
 
 	fmt.Println("Parsing command structure")
 	commands = map[string]func(*User, string) bool{
@@ -100,12 +122,20 @@ func main() {
 		},
 		"quit": func(u *User, inpstr string) bool {
 			u.Write("quitting")
-			u.Socket.Close()
+			u.Close() //disconnect user?
 			userList.RemoveUser(u)
 			return true
 		},
 	}
 
+	fmt.Println("Setting up web layer")
+	http.Handle("/", http.FileServer(http.Dir(publicDirectory)))
+	http.Handle("/com", websocket.Handler(acceptWebConnection))
+	go http.ListenAndServe(":"+strconv.Itoa(webPort), nil)
+
+	fmt.Printf("Initialising weblayer on: %d\n", webPort)
+	fmt.Printf("Initialising socket on port: %d\n", port)
+	fmt.Println("\\------------------------------------------------------------/")
 	for {
 		conn, err := ln.Accept()
 
@@ -118,15 +148,19 @@ func main() {
 	}
 }
 
-func acceptConnection(conn net.Conn) {
-	message := []byte("Thank you\n")
-
-	n, err := conn.Write(message)
-
+func acceptWebConnection(conn *websocket.Conn) {
+	u, err := NewUser()
 	if err != nil {
-		fmt.Println("unable to write message to connection ", n)
+		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", SYSERROR)))
+		conn.Close()
+		fmt.Printf("[acceptConnection] User Creation error: %s", err.Error())
 	}
+	u.WebSocket = conn
+	u.SocketType = SocketTypeWebSocket
+	handleUser(u)
+}
 
+func acceptConnection(conn net.Conn) {
 	u, err := NewUser()
 	if err != nil {
 		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", SYSERROR)))
@@ -134,25 +168,36 @@ func acceptConnection(conn net.Conn) {
 		fmt.Printf("[acceptConnection] User Creation error: %s", err.Error())
 	}
 	u.Socket = conn
-	u.LastInput = time.Now()
-	u.Write("Give me a name:")
-	//logged in
-	go handleInput(u)
+	u.SocketType = SocketTypeNetwork
+	handleUser(u)
 }
 
-func handleInput(u *User) {
+func handleUser(u *User) {
 	buffer := make([]byte, 2048)
+	u.LastInput = time.Now()
+	login(u, "")
 
 	for {
-		n, err := u.Socket.Read(buffer)
+		var n int
+		var err error
+		var text string
+
+		if u.SocketType == SocketTypeWebSocket {
+			err = websocket.Message.Receive(u.WebSocket, &text)
+			n = len(text)
+		} else {
+			n, err = u.Socket.Read(buffer)
+			text = strings.TrimSpace(string(buffer[:n]))
+		}
 		u.LastInput = time.Now()
 
 		if err != nil {
-			fmt.Println("failed to read from connection. disconnecting them.")
-			u.Socket.Close()
+			fmt.Printf("failed to read from connection. disconnecting them. %s\n", err)
+			u.Close()
+			userList.RemoveUser(u)
 			break
 		}
-		text := strings.TrimSpace(string(buffer[:n]))
+
 		fmt.Printf("client Input: '%s'\n", text)
 		if u.Login > 0 {
 			login(u, text)
