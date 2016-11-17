@@ -9,7 +9,8 @@ import (
 )
 
 const (
-	SYSERROR = "Sorry, a system error has occured"
+	SYSERROR       = "Sorry, a system error has occured"
+	defaultCommand = "say"
 )
 
 const (
@@ -61,6 +62,8 @@ func NewUser() (*User, error) {
 	return &u, nil
 }
 
+var commands map[string]func(*User, string) bool
+
 func main() {
 	port := 2000
 
@@ -74,6 +77,34 @@ func main() {
 	fmt.Println("/------------------------------------------------------------\\")
 	fmt.Println(" Talker setting up on port " + strconv.Itoa(port))
 	fmt.Println("\\------------------------------------------------------------/")
+
+	fmt.Println("Parsing command structure")
+	commands = map[string]func(*User, string) bool{
+		"who": func(u *User, inpstr string) bool {
+			u.Write("\n+----------------------+-----------+\n")
+			for _, currentUser := range userList {
+				timeDifference := time.Since(currentUser.LastInput)
+				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
+				u.Write(fmt.Sprintf("| %-20s | %9s |\n", currentUser.Name, diffString))
+			}
+			u.Write("+----------------------+-----------+\n")
+			u.Write(fmt.Sprintf("| Users Online: %-3d %-14s |\n", len(userList), " "))
+			u.Write("+----------------------+-----------+\n\n")
+			return false
+		},
+		"say": func(u *User, inpstr string) bool {
+			if inpstr != "" {
+				writeWorld(userList, u.Name+" says: "+inpstr+"\n")
+			}
+			return false
+		},
+		"quit": func(u *User, inpstr string) bool {
+			u.Write("quitting")
+			u.Socket.Close()
+			userList.RemoveUser(u)
+			return true
+		},
+	}
 
 	for {
 		conn, err := ln.Accept()
@@ -100,7 +131,7 @@ func acceptConnection(conn net.Conn) {
 	if err != nil {
 		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", SYSERROR)))
 		conn.Close()
-		fmt.Printf("[acceptCOnnection] User Creation error: %s", err.Error())
+		fmt.Printf("[acceptConnection] User Creation error: %s", err.Error())
 	}
 	u.Socket = conn
 	u.LastInput = time.Now()
@@ -126,26 +157,29 @@ func handleInput(u *User) {
 		if u.Login > 0 {
 			login(u, text)
 		} else {
-			switch text {
-			case ".quit":
-				u.Write("quitting")
-				u.Socket.Close()
-				userList.RemoveUser(u)
-				break
-			case ".who":
-				u.Write("\n+----------------------+-----------+\n")
-				for _, currentUser := range userList {
-					timeDifference := time.Since(currentUser.LastInput)
-					diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
-					u.Write(fmt.Sprintf("| %-20s | %9s |\n", currentUser.Name, diffString))
+			var possibleCommand string
+
+			if len(text) > 0 && text[0] == '.' {
+				firstWhiteSpace := strings.Index(text, " ")
+
+				if firstWhiteSpace != -1 {
+					possibleCommand = text[1:firstWhiteSpace]
+				} else {
+					possibleCommand = text[1:]
+					firstWhiteSpace = len(text)
 				}
-				u.Write("+----------------------+-----------+\n")
-				u.Write(fmt.Sprintf("| Users Online: %-3d %-14s |\n", len(userList), " "))
-				u.Write("+----------------------+-----------+\n\n")
-			default:
-				if text != "" {
-					writeWorld(userList, u.Name+" says: "+text+"\n")
+				text = text[firstWhiteSpace:]
+			} else {
+				possibleCommand = defaultCommand
+			}
+
+			if val, ok := commands[possibleCommand]; ok {
+				exitLoop := val(u, text)
+				if exitLoop == true {
+					break
 				}
+			} else {
+				u.Write("unknown command\n")
 			}
 		}
 
