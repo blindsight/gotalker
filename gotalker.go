@@ -184,6 +184,7 @@ func handleUser(u *User) {
 
 		if u.SocketType == SocketTypeWebSocket {
 			err = websocket.Message.Receive(u.WebSocket, &text)
+			text = strings.TrimSpace(text)
 			n = len(text)
 		} else {
 			n, err = u.Socket.Read(buffer)
