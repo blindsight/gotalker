@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	SYSERROR       = "Sorry, a system error has occured"
+	syserror       = "Sorry, a system error has occured"
 	defaultCommand = "say"
+	userDescLen    = 40
 )
 
 const (
@@ -103,15 +104,17 @@ func main() {
 	fmt.Println("Parsing command structure")
 	commands = map[string]func(*User, string) bool{
 		"who": func(u *User, inpstr string) bool {
-			u.Write("\n+----------------------+-----------+\n")
+			u.Write("\n+----------------------------------------------------------------------------+\n")
+			u.Write("| Name                                                           :     Tm/Id |")
+			u.Write("\n+----------------------------------------------------------------------------+\n")
 			for _, currentUser := range userList {
 				timeDifference := time.Since(currentUser.LastInput)
 				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
-				u.Write(fmt.Sprintf("| %-20s | %9s |\n", currentUser.Name, diffString))
+				u.Write(fmt.Sprintf("| %-62s | %9s |\n", currentUser.Name+" "+currentUser.Description, diffString))
 			}
-			u.Write("+----------------------+-----------+\n")
-			u.Write(fmt.Sprintf("| Users Online: %-3d %-14s |\n", len(userList), " "))
-			u.Write("+----------------------+-----------+\n\n")
+			u.Write("+----------------------------------------------------------------------------+\n")
+			u.Write(fmt.Sprintf("| Total of %-3d users online %-48s |", len(userList), " "))
+			u.Write("\n+----------------------------------------------------------------------------+\n")
 			return false
 		},
 		"say": func(u *User, inpstr string) bool {
@@ -125,6 +128,20 @@ func main() {
 			u.Close() //disconnect user?
 			userList.RemoveUser(u)
 			return true
+		},
+		"desc": func(u *User, inpstr string) bool {
+			if inpstr == "" {
+				u.Write(fmt.Sprintf("Your current description is: %s\n", u.Description))
+				return false
+
+			}
+			if len(inpstr) > userDescLen {
+				u.Write("Description too long.\n")
+				return false
+			}
+			u.Description = inpstr
+			u.Write("Description set.\n")
+			return false
 		},
 	}
 
@@ -151,7 +168,7 @@ func main() {
 func acceptWebConnection(conn *websocket.Conn) {
 	u, err := NewUser()
 	if err != nil {
-		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", SYSERROR)))
+		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", syserror)))
 		conn.Close()
 		fmt.Printf("[acceptConnection] User Creation error: %s", err.Error())
 	}
@@ -163,7 +180,7 @@ func acceptWebConnection(conn *websocket.Conn) {
 func acceptConnection(conn net.Conn) {
 	u, err := NewUser()
 	if err != nil {
-		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", SYSERROR)))
+		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", syserror)))
 		conn.Close()
 		fmt.Printf("[acceptConnection] User Creation error: %s", err.Error())
 	}
@@ -210,6 +227,7 @@ func handleUser(u *User) {
 
 				if firstWhiteSpace != -1 {
 					possibleCommand = text[1:firstWhiteSpace]
+					firstWhiteSpace++
 				} else {
 					possibleCommand = text[1:]
 					firstWhiteSpace = len(text)
