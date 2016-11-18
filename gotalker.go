@@ -279,6 +279,19 @@ func handleUser(u *User) {
 	u.LastInput = time.Now()
 	login(u, "")
 
+	//since this is the main loop go won't clean this up. should this be moved some where else?
+	logimTimeDuration := int64(time.Minute) * int64(talkerConfig.LoginIdleTime)
+	loginTimer := time.NewTimer(time.Duration(logimTimeDuration))
+	go func() {
+		<-loginTimer.C
+		since := time.Since(u.LastInput)
+		if u != nil && u.Login == LoginName && int(since.Minutes()) >= talkerConfig.LoginIdleTime {
+			u.Write("\n\n*** Time out ***\n\n")
+			u.Close()
+			userList.RemoveUser(u)
+		}
+	}()
+
 	for {
 		var n int
 		var err error
