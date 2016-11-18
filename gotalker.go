@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -44,6 +45,7 @@ type config struct {
 type system struct {
 	OnlineCount int
 	LoginCount  int
+	sync.Mutex
 }
 
 type User struct {
@@ -54,9 +56,11 @@ type User struct {
 	WebSocket   *websocket.Conn
 	LastInput   time.Time
 	SocketType  uint8
+	sync.Mutex
 }
 
 func (u *User) Write(str string) {
+	u.Lock()
 	//more will be added to this over time
 	if u.SocketType == SocketTypeWebSocket {
 		websocket.Message.Send(u.WebSocket, str)
@@ -64,25 +68,33 @@ func (u *User) Write(str string) {
 	} else {
 		u.Socket.Write([]byte(str))
 	}
+	u.Unlock()
 }
 
 func (u *User) Close() {
+	u.Lock()
 	if u.SocketType == SocketTypeWebSocket {
 		u.WebSocket.Close()
 	} else {
 		u.Socket.Close()
 	}
+	u.Unlock()
 }
 
 type users []*User
 
 var userList users
 
+var userListLock sync.Mutex
+
 func (ulist *users) AddUser(u *User) {
+	userListLock.Lock()
 	*ulist = append(*ulist, u)
+	userListLock.Unlock()
 }
 
 func (ulist *users) RemoveUser(u *User) {
+	userListLock.Lock()
 	connIndex := -1
 	for i, currentConn := range *ulist {
 		if currentConn == u {
@@ -93,6 +105,7 @@ func (ulist *users) RemoveUser(u *User) {
 		//TODO: how to deal with this in a safe way?
 		*ulist = append((*ulist)[:connIndex], (*ulist)[connIndex+1:]...)
 	}
+	userListLock.Unlock()
 }
 
 func NewUser() (*User, error) {
@@ -132,7 +145,6 @@ func main() {
 	if err != nil {
 		fmt.Println("error setting up socket")
 	}
-
 	userList = users{}
 	talkerSystem = &system{}
 	fmt.Println("/------------------------------------------------------------\\")
@@ -142,8 +154,11 @@ func main() {
 	fmt.Println("Parsing command structure")
 	commands = map[string]func(*User, string) bool{
 		"desc": func(u *User, inpstr string) bool {
+			u.Lock()
+			currentDescription := u.Description
+			u.Unlock()
 			if inpstr == "" {
-				u.Write(fmt.Sprintf("Your current description is: %s\n", u.Description))
+				u.Write(fmt.Sprintf("Your current description is: %s\n", currentDescription))
 				return false
 
 			}
@@ -151,7 +166,9 @@ func main() {
 				u.Write("Description too long.\n")
 				return false
 			}
+			u.Lock()
 			u.Description = inpstr
+			u.Unlock()
 			u.Write("Description set.\n")
 			return false
 		},
@@ -192,17 +209,26 @@ func main() {
 			return false
 		},
 		"who": func(u *User, inpstr string) bool {
-			u.Write("\n+----------------------------------------------------------------------------+\n")
-			u.Write("| Name                                                           :     Tm/Id |")
-			u.Write("\n+----------------------------------------------------------------------------+\n")
+			var templateText string
+			templateText = "\n+----------------------------------------------------------------------------+\n"
+			templateText += "| Name                                                           :     Tm/Id |"
+			templateText += "\n+----------------------------------------------------------------------------+\n"
+
+			userListLock.Lock()
 			for _, currentUser := range userList {
+				currentUser.Lock()
+				name := currentUser.Name
+				description := currentUser.Description
+				currentUser.Unlock()
 				timeDifference := time.Since(currentUser.LastInput)
 				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
-				u.Write(fmt.Sprintf("| %-62s | %9s |\n", currentUser.Name+" "+currentUser.Description, diffString))
+				templateText += fmt.Sprintf("| %-62s | %9s |\n", name+" "+description, diffString)
 			}
-			u.Write("+----------------------------------------------------------------------------+\n")
-			u.Write(fmt.Sprintf("| Total of %-3d users online %-48s |", len(userList), " "))
-			u.Write("\n+----------------------------------------------------------------------------+\n")
+			templateText += "+----------------------------------------------------------------------------+\n"
+			templateText += fmt.Sprintf("| Total of %-3d users online %-48s |", len(userList), " ")
+			templateText += "\n+----------------------------------------------------------------------------+\n"
+			userListLock.Unlock()
+			u.Write(templateText)
 			return false
 		},
 	}
@@ -210,11 +236,11 @@ func main() {
 	fmt.Println("Setting up web layer")
 	http.Handle("/", http.FileServer(http.Dir(publicDirectory)))
 	http.Handle("/com", websocket.Handler(acceptWebConnection))
-	go http.ListenAndServe(":"+strconv.Itoa(talkerConfig.Webport), nil)
-
 	fmt.Printf("Initialising weblayer on: %d\n", talkerConfig.Webport)
 	fmt.Printf("Initialising socket on port: %d\n", talkerConfig.Mainport)
 	fmt.Println("\\------------------------------------------------------------/")
+
+	go http.ListenAndServe(":"+strconv.Itoa(talkerConfig.Webport), nil)
 	for {
 		conn, err := ln.Accept()
 
@@ -258,25 +284,36 @@ func acceptConnection(u *User) {
 		userList.RemoveUser(u)
 		return
 	}
-	if talkerSystem.OnlineCount+talkerSystem.LoginCount >= talkerConfig.MaxUsers {
+
+	talkerSystem.Lock()
+	OnlineUsers := talkerSystem.OnlineCount + talkerSystem.LoginCount
+	talkerSystem.Unlock()
+
+	if OnlineUsers >= talkerConfig.MaxUsers {
 		u.Write("\n\rSorry, but we cannot accept any more connections at this moment.\n\rPlease try again later\n\n\r")
 		u.Close()
 		userList.RemoveUser(u)
 		return
 	}
 
+	talkerSystem.Lock()
 	talkerSystem.LoginCount++
+	talkerSystem.Unlock()
 	handleUser(u)
 }
 
 func connectUser(u *User) {
+	talkerSystem.Lock()
 	talkerSystem.LoginCount--
 	talkerSystem.OnlineCount++
+	talkerSystem.Unlock()
 }
 
 func handleUser(u *User) {
 	buffer := make([]byte, 2048)
+	u.Lock()
 	u.LastInput = time.Now()
+	u.Unlock()
 	login(u, "")
 
 	//since this is the main loop go won't clean this up. should this be moved some where else?
@@ -284,8 +321,11 @@ func handleUser(u *User) {
 	loginTimer := time.NewTimer(time.Duration(logimTimeDuration))
 	go func() {
 		<-loginTimer.C
+		u.Lock()
 		since := time.Since(u.LastInput)
-		if u != nil && u.Login == LoginName && int(since.Minutes()) >= talkerConfig.LoginIdleTime {
+		loginStage := u.Login
+		u.Unlock()
+		if u != nil && loginStage == LoginName && int(since.Minutes()) >= talkerConfig.LoginIdleTime {
 			u.Write("\n\n*** Time out ***\n\n")
 			u.Close()
 			userList.RemoveUser(u)
@@ -305,7 +345,9 @@ func handleUser(u *User) {
 			n, err = u.Socket.Read(buffer)
 			text = strings.TrimSpace(string(buffer[:n]))
 		}
+		u.Lock()
 		u.LastInput = time.Now()
+		u.Unlock()
 
 		if err != nil {
 			fmt.Printf("failed to read from connection. disconnecting them. %s\n", err)
@@ -366,13 +408,18 @@ func login(u *User, inpstr string) {
 			return
 		}
 		//TODO: run some checks on the user name
+		u.Lock()
 		u.Name = inpstr
-		u.Write("\nPassword:")
 		u.Login = LoginPasswd
+		u.Unlock()
+
+		u.Write("\nPassword:")
 
 	case LoginPasswd:
 		u.Write("\nPassword accepted:")
+		u.Lock()
 		u.Login = LoginLogged
+		u.Unlock()
 		userList.AddUser(u)
 		connectUser(u)
 		return
