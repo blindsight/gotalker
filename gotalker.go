@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -19,6 +23,7 @@ const (
 	syserror       = "Sorry, a system error has occured"
 	defaultCommand = "say"
 	configFile     = "datafiles/config.json"
+	comTemplates   = "comfiles"
 	userDescLen    = 40
 )
 
@@ -47,6 +52,8 @@ type system struct {
 	LoginCount  int
 	sync.Mutex
 }
+
+var commandTemplates map[string]*template.Template
 
 type User struct {
 	Name        string
@@ -127,6 +134,7 @@ func main() {
 	}
 
 	readContents, err := ioutil.ReadFile(configLocation)
+	publicDirectory := "public"
 
 	fmt.Printf("Parsing config file '%s'...\n", configLocation)
 	if err != nil {
@@ -137,8 +145,6 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Unable to read config file: %s", err.Error()))
 	}
-
-	publicDirectory := "public"
 
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(talkerConfig.Mainport))
 
@@ -209,36 +215,52 @@ func main() {
 			return false
 		},
 		"who": func(u *User, inpstr string) bool {
-			var templateText string
-			templateText = "\n+----------------------------------------------------------------------------+\n"
-			templateText += "| Name                                                           :     Tm/Id |"
-			templateText += "\n+----------------------------------------------------------------------------+\n"
+			whoTemplate, ok := commandTemplates["who"]
+			type smallUser struct {
+				NameDescription string
+				DiffString      string
+			}
 
+			var whoStruct = struct {
+				UserTotal int
+				UserList  []smallUser
+			}{}
+
+			if !ok {
+				u.Write("unable to find who template for display")
+			}
 			userListLock.Lock()
 			for _, currentUser := range userList {
 				currentUser.Lock()
-				name := currentUser.Name
-				description := currentUser.Description
-				currentUser.Unlock()
 				timeDifference := time.Since(currentUser.LastInput)
 				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
-				templateText += fmt.Sprintf("| %-62s | %9s |\n", name+" "+description, diffString)
+				whoStruct.UserList = append(whoStruct.UserList, smallUser{currentUser.Name + " " + currentUser.Description, diffString})
+				currentUser.Unlock()
 			}
-			templateText += "+----------------------------------------------------------------------------+\n"
-			templateText += fmt.Sprintf("| Total of %-3d users online %-48s |", len(userList), " ")
-			templateText += "\n+----------------------------------------------------------------------------+\n"
+			whoStruct.UserTotal = len(userList)
 			userListLock.Unlock()
-			u.Write(templateText)
+
+			var output bytes.Buffer
+			err = whoTemplate.Execute(&output, whoStruct)
+
+			if err != nil {
+				u.Write(fmt.Sprintf("template error: %s", err.Error()))
+			}
+			u.Write(output.String())
 			return false
 		},
 	}
+	fmt.Printf("Parsing command templates\n")
+	loadCommandTemplates(comTemplates)
 
 	fmt.Println("Setting up web layer")
 	http.Handle("/", http.FileServer(http.Dir(publicDirectory)))
 	http.Handle("/com", websocket.Handler(acceptWebConnection))
 	fmt.Printf("Initialising weblayer on: %d\n", talkerConfig.Webport)
 	fmt.Printf("Initialising socket on port: %d\n", talkerConfig.Mainport)
-	fmt.Println("\\------------------------------------------------------------/")
+	fmt.Println("|-------------------------------------------------------------|")
+	fmt.Printf(" Booted with PID %d\n", os.Getpid())
+	fmt.Println("\\-------------------------------------------------------------/")
 
 	go http.ListenAndServe(":"+strconv.Itoa(talkerConfig.Webport), nil)
 	for {
@@ -423,5 +445,27 @@ func login(u *User, inpstr string) {
 		userList.AddUser(u)
 		connectUser(u)
 		return
+	}
+}
+
+func loadCommandTemplates(comDirectory string) {
+	files, err := ioutil.ReadDir(comDirectory)
+	if err != nil {
+		log.Fatal(fmt.Sprintf("unable to load command templates: (%s) %s", comDirectory, err.Error()))
+	}
+
+	fmt.Printf("parsing?\n")
+	commandTemplates = make(map[string]*template.Template)
+	for _, file := range files {
+		ext := path.Ext(file.Name())
+		commandName := file.Name()[:len(file.Name())-len(ext)]
+		fmt.Printf("file name: %s %s\n", file.Name(), commandName)
+		if _, ok := commands[commandName]; ok {
+			commandTemplates[commandName], err = template.ParseFiles(comDirectory + "/" + file.Name())
+
+			if err != nil {
+				log.Fatal(fmt.Sprintf("unable to prase command template: %s", err))
+			}
+		}
 	}
 }
