@@ -103,32 +103,6 @@ func main() {
 
 	fmt.Println("Parsing command structure")
 	commands = map[string]func(*User, string) bool{
-		"who": func(u *User, inpstr string) bool {
-			u.Write("\n+----------------------------------------------------------------------------+\n")
-			u.Write("| Name                                                           :     Tm/Id |")
-			u.Write("\n+----------------------------------------------------------------------------+\n")
-			for _, currentUser := range userList {
-				timeDifference := time.Since(currentUser.LastInput)
-				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
-				u.Write(fmt.Sprintf("| %-62s | %9s |\n", currentUser.Name+" "+currentUser.Description, diffString))
-			}
-			u.Write("+----------------------------------------------------------------------------+\n")
-			u.Write(fmt.Sprintf("| Total of %-3d users online %-48s |", len(userList), " "))
-			u.Write("\n+----------------------------------------------------------------------------+\n")
-			return false
-		},
-		"say": func(u *User, inpstr string) bool {
-			if inpstr != "" {
-				writeWorld(userList, u.Name+" says: "+inpstr+"\n")
-			}
-			return false
-		},
-		"quit": func(u *User, inpstr string) bool {
-			u.Write("quitting")
-			u.Close() //disconnect user?
-			userList.RemoveUser(u)
-			return true
-		},
 		"desc": func(u *User, inpstr string) bool {
 			if inpstr == "" {
 				u.Write(fmt.Sprintf("Your current description is: %s\n", u.Description))
@@ -141,6 +115,56 @@ func main() {
 			}
 			u.Description = inpstr
 			u.Write("Description set.\n")
+			return false
+		},
+		"help": func(u *User, inpstr string) bool {
+			u.Write("\n+----------------------------------------------------------------------------+\n")
+			u.Write("   All commands start with a '.'                                                \n")
+			u.Write("+----------------------------------------------------------------------------+\n")
+
+			var output string
+			count := 0
+			for key := range commands {
+				count++
+				output += fmt.Sprintf("%11s", key)
+
+				if count%5 == 0 {
+					output += "\n"
+				}
+			}
+			if count%5 != 0 {
+				output += "\n"
+			}
+			u.Write(output)
+			u.Write("+----------------------------------------------------------------------------+\n")
+			u.Write(fmt.Sprintf(" There is a total of %d commands that you can use\n", count))
+			u.Write("+----------------------------------------------------------------------------+\n")
+			return false
+		},
+		"quit": func(u *User, inpstr string) bool {
+			u.Write("quitting")
+			u.Close() //disconnect user?
+			userList.RemoveUser(u)
+			return true
+		},
+		"say": func(u *User, inpstr string) bool {
+			if inpstr != "" {
+				writeWorld(userList, u.Name+" says: "+inpstr+"\n")
+			}
+			return false
+		},
+		"who": func(u *User, inpstr string) bool {
+			u.Write("\n+----------------------------------------------------------------------------+\n")
+			u.Write("| Name                                                           :     Tm/Id |")
+			u.Write("\n+----------------------------------------------------------------------------+\n")
+			for _, currentUser := range userList {
+				timeDifference := time.Since(currentUser.LastInput)
+				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
+				u.Write(fmt.Sprintf("| %-62s | %9s |\n", currentUser.Name+" "+currentUser.Description, diffString))
+			}
+			u.Write("+----------------------------------------------------------------------------+\n")
+			u.Write(fmt.Sprintf("| Total of %-3d users online %-48s |", len(userList), " "))
+			u.Write("\n+----------------------------------------------------------------------------+\n")
 			return false
 		},
 	}
