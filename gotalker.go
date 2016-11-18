@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +17,7 @@ import (
 const (
 	syserror       = "Sorry, a system error has occured"
 	defaultCommand = "say"
+	configFile     = "datafiles/config.json"
 	userDescLen    = 40
 )
 
@@ -28,6 +32,19 @@ const (
 )
 
 //var connections []net.Conn
+type config struct {
+	Mainport      int  `json:"main_port"`
+	Webport       int  `json:"web_port"`
+	MaxUsers      int  `json:"max_users"`
+	LoginIdleTime int  `json:"login_idle_time"`
+	UserIdleTime  int  `json:"user_idle_time"`
+	StopLogins    bool `json:"stop_logins"`
+}
+
+type system struct {
+	OnlineCount int
+	LoginCount  int
+}
 
 type User struct {
 	Name        string
@@ -73,6 +90,7 @@ func (ulist *users) RemoveUser(u *User) {
 		}
 	}
 	if connIndex > -1 {
+		//TODO: how to deal with this in a safe way?
 		*ulist = append((*ulist)[:connIndex], (*ulist)[connIndex+1:]...)
 	}
 }
@@ -84,19 +102,39 @@ func NewUser() (*User, error) {
 }
 
 var commands map[string]func(*User, string) bool
+var talkerSystem *system
+var talkerConfig *config
 
 func main() {
-	port := 2000
-	webPort := 2010
-	publicDirectory := "var/gotalker/public"
+	var configLocation string
+	if len(os.Args) > 1 {
+		configLocation = os.Args[1]
+	} else {
+		configLocation = configFile
+	}
 
-	ln, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	readContents, err := ioutil.ReadFile(configLocation)
+
+	fmt.Printf("Parsing config file '%s'...\n", configLocation)
+	if err != nil {
+		panic(fmt.Sprintf("Cannot open config file: %s", err.Error()))
+	}
+
+	err = json.Unmarshal(readContents, &talkerConfig)
+	if err != nil {
+		panic(fmt.Sprintf("Unable to read config file: %s", err.Error()))
+	}
+
+	publicDirectory := "public"
+
+	ln, err := net.Listen("tcp", ":"+strconv.Itoa(talkerConfig.Mainport))
 
 	if err != nil {
 		fmt.Println("error setting up socket")
 	}
 
 	userList = users{}
+	talkerSystem = &system{}
 	fmt.Println("/------------------------------------------------------------\\")
 	fmt.Printf(" GoTalker server booting %s\n", time.Now().Format(time.ANSIC))
 	fmt.Println("|-------------------------------------------------------------|")
@@ -172,10 +210,10 @@ func main() {
 	fmt.Println("Setting up web layer")
 	http.Handle("/", http.FileServer(http.Dir(publicDirectory)))
 	http.Handle("/com", websocket.Handler(acceptWebConnection))
-	go http.ListenAndServe(":"+strconv.Itoa(webPort), nil)
+	go http.ListenAndServe(":"+strconv.Itoa(talkerConfig.Webport), nil)
 
-	fmt.Printf("Initialising weblayer on: %d\n", webPort)
-	fmt.Printf("Initialising socket on port: %d\n", port)
+	fmt.Printf("Initialising weblayer on: %d\n", talkerConfig.Webport)
+	fmt.Printf("Initialising socket on port: %d\n", talkerConfig.Mainport)
 	fmt.Println("\\------------------------------------------------------------/")
 	for {
 		conn, err := ln.Accept()
@@ -185,7 +223,7 @@ func main() {
 			continue
 		}
 
-		go acceptConnection(conn)
+		go acceptHTTPConnection(conn)
 	}
 }
 
@@ -198,10 +236,10 @@ func acceptWebConnection(conn *websocket.Conn) {
 	}
 	u.WebSocket = conn
 	u.SocketType = SocketTypeWebSocket
-	handleUser(u)
+	acceptConnection(u)
 }
 
-func acceptConnection(conn net.Conn) {
+func acceptHTTPConnection(conn net.Conn) {
 	u, err := NewUser()
 	if err != nil {
 		conn.Write([]byte(fmt.Sprintf("\n\r%s: unable to create session", syserror)))
@@ -210,7 +248,30 @@ func acceptConnection(conn net.Conn) {
 	}
 	u.Socket = conn
 	u.SocketType = SocketTypeNetwork
+	acceptConnection(u)
+}
+
+func acceptConnection(u *User) {
+	if talkerConfig.StopLogins {
+		u.Write("\n\rSorry, but no connections can be made at the moment.\n\rPlease try later\n\n\r")
+		u.Close()
+		userList.RemoveUser(u)
+		return
+	}
+	if talkerSystem.OnlineCount+talkerSystem.LoginCount >= talkerConfig.MaxUsers {
+		u.Write("\n\rSorry, but we cannot accept any more connections at this moment.\n\rPlease try again later\n\n\r")
+		u.Close()
+		userList.RemoveUser(u)
+		return
+	}
+
+	talkerSystem.LoginCount++
 	handleUser(u)
+}
+
+func connectUser(u *User) {
+	talkerSystem.LoginCount--
+	talkerSystem.OnlineCount++
 }
 
 func handleUser(u *User) {
@@ -300,6 +361,7 @@ func login(u *User, inpstr string) {
 		u.Write("\nPassword accepted:")
 		u.Login = LoginLogged
 		userList.AddUser(u)
+		connectUser(u)
 		return
 	}
 }
