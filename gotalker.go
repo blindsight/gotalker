@@ -66,6 +66,32 @@ type User struct {
 	sync.Mutex
 }
 
+func (u *User) Disconnect() {
+	var site string
+	var name string
+	var loginState uint8
+	u.Lock()
+	if u.SocketType == SocketTypeWebSocket {
+		site = u.WebSocket.RemoteAddr().String()
+	} else {
+		site = u.Socket.RemoteAddr().String()
+	}
+	name = u.Name
+	loginState = u.Login
+	u.Unlock()
+
+	if loginState == 0 {
+		u.Write("\nYou are removed from this reality...\n\n")
+		u.Write(fmt.Sprintf("You were logged on from site %s\n", site))
+		writeWorld(userList, fmt.Sprintf("[Leaving is: %s]\n", name))
+	}
+	u.Close()
+
+	talkerSystem.Lock()
+	talkerSystem.OnlineCount--
+	talkerSystem.Unlock()
+}
+
 func (u *User) Write(str string) {
 	u.Lock()
 	//more will be added to this over time
@@ -203,8 +229,7 @@ func main() {
 			return false
 		},
 		"quit": func(u *User, inpstr string) bool {
-			u.Write("quitting")
-			u.Close() //disconnect user?
+			u.Disconnect()
 			userList.RemoveUser(u)
 			return true
 		},
@@ -302,7 +327,7 @@ func acceptHTTPConnection(conn net.Conn) {
 func acceptConnection(u *User) {
 	if talkerConfig.StopLogins {
 		u.Write("\n\rSorry, but no connections can be made at the moment.\n\rPlease try later\n\n\r")
-		u.Close()
+		u.Disconnect()
 		userList.RemoveUser(u)
 		return
 	}
@@ -313,7 +338,7 @@ func acceptConnection(u *User) {
 
 	if OnlineUsers >= talkerConfig.MaxUsers {
 		u.Write("\n\rSorry, but we cannot accept any more connections at this moment.\n\rPlease try again later\n\n\r")
-		u.Close()
+		u.Disconnect()
 		userList.RemoveUser(u)
 		return
 	}
@@ -349,7 +374,7 @@ func handleUser(u *User) {
 		u.Unlock()
 		if u != nil && loginStage == LoginName && int(since.Minutes()) >= talkerConfig.LoginIdleTime {
 			u.Write("\n\n*** Time out ***\n\n")
-			u.Close()
+			u.Disconnect()
 			userList.RemoveUser(u)
 		}
 	}()
@@ -373,7 +398,7 @@ func handleUser(u *User) {
 
 		if err != nil {
 			fmt.Printf("failed to read from connection. disconnecting them. %s\n", err)
-			u.Close()
+			u.Disconnect()
 			userList.RemoveUser(u)
 			break
 		}
@@ -454,12 +479,10 @@ func loadCommandTemplates(comDirectory string) {
 		log.Fatal(fmt.Sprintf("unable to load command templates: (%s) %s", comDirectory, err.Error()))
 	}
 
-	fmt.Printf("parsing?\n")
 	commandTemplates = make(map[string]*template.Template)
 	for _, file := range files {
 		ext := path.Ext(file.Name())
 		commandName := file.Name()[:len(file.Name())-len(ext)]
-		fmt.Printf("file name: %s %s\n", file.Name(), commandName)
 		if _, ok := commands[commandName]; ok {
 			commandTemplates[commandName], err = template.ParseFiles(comDirectory + "/" + file.Name())
 
