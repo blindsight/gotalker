@@ -239,6 +239,19 @@ func main() {
 			}
 			return false
 		},
+		"think": func(u *User, inpstr string) bool {
+			var name string
+			u.Lock()
+			name = u.Name
+			u.Unlock()
+
+			if inpstr == "" {
+				writeWorld(userList, fmt.Sprintf("%s thinks nothing--now that is just typical!\n", name))
+			} else {
+				writeWorld(userList, fmt.Sprintf("%s thinks . o O ( %s )\n", name, inpstr))
+			}
+			return false
+		},
 		"who": func(u *User, inpstr string) bool {
 			whoTemplate, ok := commandTemplates["who"]
 			type smallUser struct {
