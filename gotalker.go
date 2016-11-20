@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ const (
 	defaultCommand = "say"
 	configFile     = "datafiles/config.json"
 	comTemplates   = "comfiles"
+	motdFiles      = "motds/"
 	userDescLen    = 40
 )
 
@@ -50,6 +52,8 @@ type config struct {
 type system struct {
 	OnlineCount int
 	LoginCount  int
+	Motd1Count  int
+	Motd2Count  int
 	sync.Mutex
 }
 
@@ -291,6 +295,9 @@ func main() {
 	fmt.Printf("Parsing command templates\n")
 	loadCommandTemplates(comTemplates)
 
+	countMotds(motdFiles)
+	fmt.Printf("There %d login motds and %d post-login motds\n", talkerSystem.Motd1Count, talkerSystem.Motd2Count)
+
 	fmt.Println("Setting up web layer")
 	http.Handle("/", http.FileServer(http.Dir(publicDirectory)))
 	http.Handle("/com", websocket.Handler(acceptWebConnection))
@@ -338,6 +345,23 @@ func acceptHTTPConnection(conn net.Conn) {
 }
 
 func acceptConnection(u *User) {
+	var motd1Count int
+	talkerSystem.Lock()
+	motd1Count = talkerSystem.Motd1Count
+	talkerSystem.Unlock()
+
+	if motd1Count > 0 {
+		contents, err := ioutil.ReadFile(motdFiles + "/motd1/motd" + strconv.Itoa(rand.Intn(motd1Count)) + ".tmpl")
+		if err != nil {
+			fmt.Printf("problem with motd1: %s\n", err.Error())
+		} else {
+			u.Write(string(contents))
+		}
+
+	} else {
+		u.Write("Welcome to here!\n\nSorry, but the login screen sppears to be missing at this time.\n\r")
+	}
+
 	if talkerConfig.StopLogins {
 		u.Write("\n\rSorry, but no connections can be made at the moment.\n\rPlease try later\n\n\r")
 		u.Disconnect()
@@ -363,10 +387,19 @@ func acceptConnection(u *User) {
 }
 
 func connectUser(u *User) {
+	var name string
+	var desc string
 	talkerSystem.Lock()
 	talkerSystem.LoginCount--
 	talkerSystem.OnlineCount++
 	talkerSystem.Unlock()
+
+	u.Lock()
+	name = u.Name
+	desc = u.Description
+	u.Unlock()
+
+	writeWorld(userList, fmt.Sprintf("[Entering is: %s %s]\n", name, desc))
 }
 
 func handleUser(u *User) {
@@ -476,10 +509,33 @@ func login(u *User, inpstr string) {
 		u.Write("\nPassword:")
 
 	case LoginPasswd:
-		u.Write("\nPassword accepted:")
+		var motd2Count int
+		talkerSystem.Lock()
+		motd2Count = talkerSystem.Motd2Count
+		talkerSystem.Unlock()
+
+		if motd2Count > 0 {
+			contents, err := ioutil.ReadFile(motdFiles + "/motd2/motd" + strconv.Itoa(rand.Intn(motd2Count)) + ".tmpl")
+			if err != nil {
+				fmt.Printf("problem with motd2: %s\n", err.Error())
+			} else {
+				u.Write("\n" + string(contents))
+			}
+
+		} else {
+			u.Write("Welcome to here!\n\nSorry, but the post login screen sppears to be missing at this time.\n\r")
+		}
+
+		u.Write("\n\nPress return to continue: \n\n")
+		u.Lock()
+		u.Login = LoginPrompt
+		u.Unlock()
+		return
+	case LoginPrompt:
 		u.Lock()
 		u.Login = LoginLogged
 		u.Unlock()
+		u.Write("\n\n")
 		userList.AddUser(u)
 		connectUser(u)
 		return
@@ -504,4 +560,30 @@ func loadCommandTemplates(comDirectory string) {
 			}
 		}
 	}
+}
+
+func countMotds(motdDir string) error {
+	talkerSystem.Lock()
+	talkerSystem.Motd1Count = 0
+	talkerSystem.Motd2Count = 0
+	talkerSystem.Unlock()
+
+	files, err := ioutil.ReadDir(motdDir + "/motd1")
+
+	if err != nil {
+		return fmt.Errorf("Directory open failure in count motds: %s", err.Error())
+	}
+
+	files2, err := ioutil.ReadDir(motdDir + "/motd2")
+
+	if err != nil {
+		return fmt.Errorf("Directory open failure in count motds: %s", err.Error())
+	}
+
+	talkerSystem.Lock()
+	talkerSystem.Motd1Count = len(files)
+	talkerSystem.Motd2Count = len(files2)
+	talkerSystem.Unlock()
+
+	return nil
 }
