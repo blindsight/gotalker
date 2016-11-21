@@ -24,9 +24,13 @@ const (
 	syserror       = "Sorry, a system error has occured"
 	defaultCommand = "say"
 	configFile     = "datafiles/config.json"
+	colorCodeFile  = "datafiles/colorCodes.json"
 	comTemplates   = "comfiles"
 	motdFiles      = "motds/"
 	userDescLen    = 40
+	userNameMin    = 3
+	userNameLenMax = 16
+	recapNameMax   = userNameLenMax*4 + 3
 )
 
 const (
@@ -57,10 +61,18 @@ type system struct {
 	sync.Mutex
 }
 
+type colorCodes struct {
+	TextCode   string `json:"textCode"`
+	EscapeCode string `json:"escapeCode"`
+}
+
+var colorCodesList []colorCodes
+
 var commandTemplates map[string]*template.Template
 
 type User struct {
 	Name        string
+	Recap       string
 	Description string
 	Login       uint8
 	Socket      net.Conn
@@ -80,7 +92,7 @@ func (u *User) Disconnect() {
 	} else {
 		site = u.Socket.RemoteAddr().String()
 	}
-	name = u.Name
+	name = u.Recap
 	loginState = u.Login
 	u.Unlock()
 
@@ -97,13 +109,51 @@ func (u *User) Disconnect() {
 }
 
 func (u *User) Write(str string) {
+	var output []rune
+	wait := 0
+
+	//what's the better way to do this? too many cases.. not well thought out
+	for index, char := range str {
+		if wait > 0 {
+			wait--
+			continue
+		}
+
+		if char == '^' && len(str) < index+1 && str[index+1] == '~' {
+			output = append(output, char)
+			output = append(output, '~')
+			wait = 1
+		} else if char == '~' {
+			colorFind := str[index+1 : index+3]
+			foundCode := false
+
+			for i := 0; i < len(colorCodesList); i++ {
+				if colorFind == colorCodesList[i].TextCode {
+					output = append(output, []rune(colorCodesList[i].EscapeCode)...)
+					foundCode = true
+					wait = 2
+					break
+				}
+			}
+
+			if foundCode == false {
+				output = append(output, char)
+			}
+		} else {
+			output = append(output, char)
+		}
+	}
+
+	//0 is assumed to be the escape character
+	output = append(output, []rune(colorCodesList[0].EscapeCode)...)
+
 	u.Lock()
 	//more will be added to this over time
 	if u.SocketType == SocketTypeWebSocket {
-		websocket.Message.Send(u.WebSocket, str)
+		websocket.Message.Send(u.WebSocket, string(output))
 		//u.WebSocket.Write([]byte(str))
 	} else {
-		u.Socket.Write([]byte(str))
+		u.Socket.Write([]byte(string(output)))
 	}
 	u.Unlock()
 }
@@ -181,8 +231,16 @@ func main() {
 	if err != nil {
 		fmt.Println("error setting up socket")
 	}
+
 	userList = users{}
 	talkerSystem = &system{}
+
+	readContents, err = ioutil.ReadFile(colorCodeFile)
+	err = json.Unmarshal(readContents, &colorCodesList)
+	if err != nil {
+		fmt.Println(fmt.Sprintf("unable to read color codes: %s", err.Error()))
+	}
+
 	fmt.Println("/------------------------------------------------------------\\")
 	fmt.Printf(" GoTalker server booting %s\n", time.Now().Format(time.ANSIC))
 	fmt.Println("|-------------------------------------------------------------|")
@@ -239,14 +297,52 @@ func main() {
 		},
 		"say": func(u *User, inpstr string) bool {
 			if inpstr != "" {
-				writeWorld(userList, u.Name+" says: "+inpstr+"\n")
+				writeWorld(userList, u.Recap+" says: "+inpstr+"\n")
 			}
+			return false
+		},
+		"set": func(u *User, inpstr string) bool {
+			spaceIndex := strings.Index(inpstr, " ")
+			if spaceIndex == -1 {
+				u.Write("set recap: set recap <name as you would like it.\n")
+				//show attributes
+				return false
+			}
+			subCommand := inpstr[:spaceIndex]
+			afterCommand := inpstr[spaceIndex+1:]
+			switch subCommand {
+			case "recap":
+				if afterCommand == "" {
+					u.Write("Usage: set recap <name as you would like it.\n")
+					return false
+				}
+
+				if len(afterCommand) > recapNameMax-3 {
+					u.Write("The recapped name length is too long - try using fewer color codes")
+					return false
+				}
+
+				u.Lock()
+				name := u.Name
+				u.Unlock()
+				recname := colorComStrip(afterCommand)
+
+				if len(recname) > userNameLenMax || strings.ToLower(recname) != strings.ToLower(name) {
+					u.Write("The recapped name still has to match your proper name.\n")
+					return false
+				}
+				u.Lock()
+				u.Recap = afterCommand + "~RS"
+				u.Unlock()
+				u.Write(fmt.Sprintf("Your name will now appear as '%s~RS' on the 'who', 'examine', tells, etc\n", afterCommand))
+			}
+
 			return false
 		},
 		"think": func(u *User, inpstr string) bool {
 			var name string
 			u.Lock()
-			name = u.Name
+			name = u.Recap
 			u.Unlock()
 
 			if inpstr == "" {
@@ -259,8 +355,10 @@ func main() {
 		"who": func(u *User, inpstr string) bool {
 			whoTemplate, ok := commandTemplates["who"]
 			type smallUser struct {
-				NameDescription string
-				DiffString      string
+				Name        string
+				Recap       string
+				Description string
+				DiffString  string
 			}
 
 			var whoStruct = struct {
@@ -276,7 +374,7 @@ func main() {
 				currentUser.Lock()
 				timeDifference := time.Since(currentUser.LastInput)
 				diffString := time.Duration((timeDifference / time.Second) * time.Second).String()
-				whoStruct.UserList = append(whoStruct.UserList, smallUser{currentUser.Name + " " + currentUser.Description, diffString})
+				whoStruct.UserList = append(whoStruct.UserList, smallUser{currentUser.Name, currentUser.Recap, currentUser.Description, diffString})
 				currentUser.Unlock()
 			}
 			whoStruct.UserTotal = len(userList)
@@ -395,11 +493,11 @@ func connectUser(u *User) {
 	talkerSystem.Unlock()
 
 	u.Lock()
-	name = u.Name
+	name = u.Recap
 	desc = u.Description
 	u.Unlock()
 
-	writeWorld(userList, fmt.Sprintf("[Entering is: %s %s]\n", name, desc))
+	writeWorld(userList, fmt.Sprintf("~OL[Entering is: ~RS%s~RS %s~RS~OL]\n", name, desc))
 }
 
 func handleUser(u *User) {
@@ -500,9 +598,18 @@ func login(u *User, inpstr string) {
 			u.Write("\nGive me a name:")
 			return
 		}
+		if len(inpstr) < userNameMin {
+			u.Write("\nName too short.\n\n")
+			return
+		}
+		if len(inpstr) > userNameLenMax {
+			u.Write("\nName too long.\n\n")
+			return
+		}
 		//TODO: run some checks on the user name
 		u.Lock()
 		u.Name = inpstr
+		u.Recap = inpstr
 		u.Login = LoginPasswd
 		u.Unlock()
 
@@ -543,6 +650,15 @@ func login(u *User, inpstr string) {
 }
 
 func loadCommandTemplates(comDirectory string) {
+	templateFuncs := template.FuncMap{
+		"colorCount": func(format string, addTo int) int {
+			return countColors(format) + addTo
+		},
+		"join": func(joinString string, s ...string) string {
+			return strings.Join(s, joinString)
+		},
+	}
+
 	files, err := ioutil.ReadDir(comDirectory)
 	if err != nil {
 		log.Fatal(fmt.Sprintf("unable to load command templates: (%s) %s", comDirectory, err.Error()))
@@ -553,7 +669,7 @@ func loadCommandTemplates(comDirectory string) {
 		ext := path.Ext(file.Name())
 		commandName := file.Name()[:len(file.Name())-len(ext)]
 		if _, ok := commands[commandName]; ok {
-			commandTemplates[commandName], err = template.ParseFiles(comDirectory + "/" + file.Name())
+			commandTemplates[commandName], err = template.New(file.Name()).Funcs(templateFuncs).ParseFiles(comDirectory + "/" + file.Name())
 
 			if err != nil {
 				log.Fatal(fmt.Sprintf("unable to prase command template: %s", err))
@@ -586,4 +702,57 @@ func countMotds(motdDir string) error {
 	talkerSystem.Unlock()
 
 	return nil
+}
+
+func countColors(colorString string) int {
+	colorCount := 0
+	wait := 0
+	for index, char := range colorString {
+		if wait > 0 {
+			wait--
+			continue
+		}
+		if char == '^' && len(colorString) < index+1 && colorString[index+1] == '~' {
+			wait = 1
+			continue
+		} else if char == '~' {
+			colorFind := colorString[index+1 : index+3]
+			for i := 0; i < len(colorCodesList); i++ {
+				if colorFind == colorCodesList[i].TextCode {
+					colorCount += 1 + len(colorCodesList[i].TextCode)
+					wait = len(colorCodesList[i].TextCode)
+					break
+				}
+			}
+		}
+	}
+
+	return colorCount
+}
+
+func colorComStrip(str string) string {
+	removedColor := ""
+	wait := 0
+	foundColor := false
+	for index, char := range str {
+		if wait > 0 {
+			wait--
+			foundColor = false
+			continue
+		}
+		if char == '~' && (index == 0 || index > 0 && str[index-1] != '^') {
+			colorFind := str[index+1 : index+3]
+			for i := 0; i < len(colorCodesList); i++ {
+				if colorFind == colorCodesList[i].TextCode {
+					wait = len(colorCodesList[i].TextCode)
+					foundColor = true
+					break
+				}
+			}
+		}
+		if foundColor == false {
+			removedColor += string(char)
+		}
+	}
+	return removedColor
 }
