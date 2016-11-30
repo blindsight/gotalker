@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -22,11 +23,13 @@ import (
 
 const (
 	syserror       = "Sorry, a system error has occured"
+	notloggedon    = "There is no one of that name logged on."
 	defaultCommand = "say"
 	configFile     = "datafiles/config.json"
 	colorCodeFile  = "datafiles/colorCodes.json"
 	comTemplates   = "comfiles"
 	motdFiles      = "motds/"
+	userFiles      = "userfiles/"
 	userDescLen    = 40
 	userNameMin    = 3
 	userNameLenMax = 16
@@ -66,20 +69,50 @@ type colorCodes struct {
 	EscapeCode string `json:"escapeCode"`
 }
 
+type messageHistory struct {
+	user    string
+	event   time.Time
+	message string
+}
+
 var colorCodesList []colorCodes
 
 var commandTemplates map[string]*template.Template
 
 type User struct {
-	Name        string
-	Recap       string
-	Description string
-	Login       uint8
-	Socket      net.Conn
-	WebSocket   *websocket.Conn
-	LastInput   time.Time
-	SocketType  uint8
-	sync.Mutex
+	Name        string          `json:"name"`
+	Recap       string          `json:"recap"`
+	Description string          `json:"description"`
+	Login       uint8           `json:"-"`
+	Socket      net.Conn        `json:"-"`
+	WebSocket   *websocket.Conn `json:"-"`
+	LastInput   time.Time       `json:"last_input"`
+	SocketType  uint8           `json:"-"`
+	PastTells   []*messageHistory
+	sync.Mutex  `json:"-"`
+}
+
+func NewUser() (*User, error) {
+	u := User{}
+	u.Login = LoginName
+	return &u, nil
+}
+
+func LoadFromFile(filepath string) (*User, error) {
+	u := &User{}
+
+	data, err := ioutil.ReadFile(filepath)
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal(data, u)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return u, nil
 }
 
 func (u *User) Disconnect() {
@@ -103,6 +136,10 @@ func (u *User) Disconnect() {
 	}
 	u.Close()
 
+	err := u.SaveToFile(userFiles + u.Name + ".json")
+	if err != nil {
+		fmt.Printf("unable to save user file for '%s': %s \n", u.Name, err.Error())
+	}
 	talkerSystem.Lock()
 	talkerSystem.OnlineCount--
 	talkerSystem.Unlock()
@@ -158,6 +195,45 @@ func (u *User) Write(str string) {
 	u.Unlock()
 }
 
+func (u *User) SaveToFile(savePath string) error {
+	data, err := json.Marshal(u)
+	if err != nil {
+		return err
+	}
+
+	_, err = os.Stat(path.Dir(savePath))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err = os.Mkdir(path.Dir(savePath), 0700); err != nil {
+			return err
+		}
+	}
+
+	err = ioutil.WriteFile(savePath, data, 0600)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (u *User) Tell(fromUser *User, message string) {
+	u.Lock()
+	fromUser.Lock()
+	fullMessage := fmt.Sprintf("%s tells you~RS: %s\n", u.Recap, message)
+	fullFromMessage := fmt.Sprintf("you tell %s~RS: %s\n", fromUser.Recap, message)
+
+	u.PastTells = append(u.PastTells, &messageHistory{fromUser.Name, time.Now(), fullFromMessage})
+	fromUser.PastTells = append(fromUser.PastTells, &messageHistory{u.Name, time.Now(), fullMessage})
+	fromUser.Unlock()
+	u.Unlock()
+
+	fromUser.Write(fullMessage)
+	u.Write(fullFromMessage)
+}
+
 func (u *User) Close() {
 	u.Lock()
 	if u.SocketType == SocketTypeWebSocket {
@@ -195,10 +271,22 @@ func (ulist *users) RemoveUser(u *User) {
 	userListLock.Unlock()
 }
 
-func NewUser() (*User, error) {
-	u := User{}
-	u.Login = LoginName
-	return &u, nil
+func (ulist *users) FindByUserName(username string) (*User, error) {
+	var foundUser *User
+	userListLock.Lock()
+	for _, u := range *ulist {
+		u.Lock()
+		if u.Name == username {
+			foundUser = u
+		}
+		u.Unlock()
+	}
+	userListLock.Unlock()
+	if foundUser == nil {
+		return nil, errors.New("unable to find user")
+	}
+
+	return foundUser, nil
 }
 
 var commands map[string]func(*User, string) bool
@@ -295,6 +383,23 @@ func main() {
 			userList.RemoveUser(u)
 			return true
 		},
+		"revtell": func(u *User, inpstr string) bool {
+			u.Write("\n~BB~FG*** Your Tell buffer ***\n")
+			if len(u.PastTells) == 0 {
+				u.Write("Revtell buffer is empty.\n")
+				return false
+			}
+
+			var tellHistory string
+			u.Lock()
+			for _, tellMessage := range u.PastTells {
+				tellHistory += tellMessage.message
+			}
+			u.Unlock()
+			u.Write(tellHistory)
+			u.Write("\n~BB~FG*** End ***\n\n")
+			return false
+		},
 		"say": func(u *User, inpstr string) bool {
 			if inpstr != "" {
 				writeWorld(userList, u.Recap+" says: "+inpstr+"\n")
@@ -335,6 +440,37 @@ func main() {
 				u.Recap = afterCommand + "~RS"
 				u.Unlock()
 				u.Write(fmt.Sprintf("Your name will now appear as '%s~RS' on the 'who', 'examine', tells, etc\n", afterCommand))
+			}
+
+			return false
+		},
+		"tell": func(u *User, inpstr string) bool {
+			if inpstr == "" {
+				//TODO: review tells
+				u.Write("Usage tell <user> <text>\n")
+				return false
+			} // else if only user name?
+
+			spaceIndex := strings.Index(inpstr, " ")
+			if spaceIndex == -1 { //has user but nothing else
+				u.Write("Usage tell <user> <text>\n")
+				//show attributes
+				return false
+			}
+			userName := inpstr[:spaceIndex]
+			message := inpstr[spaceIndex+1:]
+
+			otherUser, err := userList.FindByUserName(userName)
+			if err != nil {
+				u.Write(notloggedon + "\n")
+			}
+
+			if otherUser != nil {
+				if otherUser == u {
+					u.Write("Talking to yourself is the first sign of madness\n")
+					return false
+				}
+				u.Tell(otherUser, message)
 			}
 
 			return false
@@ -606,16 +742,42 @@ func login(u *User, inpstr string) {
 			u.Write("\nName too long.\n\n")
 			return
 		}
-		//TODO: run some checks on the user name
-		u.Lock()
-		u.Name = inpstr
-		u.Recap = inpstr
-		u.Login = LoginPasswd
-		u.Unlock()
+
+		//check password..
+		_, err := os.Stat(userFiles + u.Name + ".json")
+
+		if err != nil && os.IsNotExist(err) {
+			u.Write("new user...\n")
+			u.Lock()
+			u.Name = inpstr
+			u.Recap = inpstr
+			u.Login = LoginConfirm
+			u.Unlock()
+		} else {
+			u.Lock()
+			u.Name = inpstr
+			u.Recap = inpstr
+			u.Login = LoginPasswd
+			u.Unlock()
+		}
 
 		u.Write("\nPassword:")
-
+		return
 	case LoginPasswd:
+		//check password
+		u.Lock()
+		u.Login = LoginPrompt
+		u.Unlock()
+		return
+	case LoginConfirm:
+		u.Lock()
+		u.Description = "is a newbie."
+		u.SaveToFile(userFiles + u.Name + ".json")
+		u.Login = LoginPrompt
+		u.Unlock()
+		u.Write("\n\nPress return to continue: \n\n")
+		return
+	case LoginPrompt:
 		var motd2Count int
 		talkerSystem.Lock()
 		motd2Count = talkerSystem.Motd2Count
@@ -634,11 +796,7 @@ func login(u *User, inpstr string) {
 		}
 
 		u.Write("\n\nPress return to continue: \n\n")
-		u.Lock()
-		u.Login = LoginPrompt
-		u.Unlock()
-		return
-	case LoginPrompt:
+
 		u.Lock()
 		u.Login = LoginLogged
 		u.Unlock()
